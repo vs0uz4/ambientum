@@ -12,8 +12,12 @@ FROM alpine:3.11
 # Repository/Image Maintainer
 LABEL maintainer="Diego Hernandes <iamhernandev@gmail.com>"
 
+# Platform args.
+ARG TARGETPLATFORM
+ARG BUILDPLATFORM
+
 # Avoid cache use when PHP version changes
-ENV CURRENT_PHP_VERSION=7.3.25
+ENV CURRENT_PHP_VERSION=7.3.33
 
 # Variables for enabling NewRelic
 ENV ENV="/etc/profile" \
@@ -23,6 +27,7 @@ ENV ENV="/etc/profile" \
     OPCACHE_MODE="normal" \
     PHP_MEMORY_LIMIT=256M \
     XDEBUG_ENABLED=false \
+    XDEBUG_IDE_KEY="ambientum" \
     NR_ENABLED=false \
     NR_APP_NAME="" \
     NR_LICENSE_KEY="" \
@@ -40,6 +45,12 @@ COPY --from=ambientum/mkcert:1.4 /bin/mkcert /bin/mkcert
 # Install PHP From DotDeb, Common Extensions, Composer and then cleanup
 RUN echo "---> Enabling PHP-Alpine" && \
     apk add --update \
+    gettext \
+    less \
+    ca-certificates \
+    tar \
+    xz \
+    jq \
     wget \
     curl \
     openssh \
@@ -54,7 +65,16 @@ RUN echo "---> Enabling PHP-Alpine" && \
     unzip \
     wget \
     make \
-    sudo && \
+    sudo \
+    s6 && \
+    echo "---> Installing static FFMpeg binaries" && \
+    export FFMPEG_PLATFORM=$(echo $TARGETPLATFORM | sed 's/linux\///g') && \
+    wget -O /tmp/ffmpeg.tar.xz "https://www.johnvansickle.com/ffmpeg/old-releases/ffmpeg-4.4-${FFMPEG_PLATFORM}-static.tar.xz" && \
+    tar --directory=/tmp -xvf /tmp/ffmpeg.tar.xz && \
+    mv "/tmp/ffmpeg-4.4-${FFMPEG_PLATFORM}-static/ffmpeg" /bin/ffmpeg && \
+    mv "/tmp/ffmpeg-4.4-${FFMPEG_PLATFORM}-static/ffprobe" /bin/ffprobe && \
+    mv "/tmp/ffmpeg-4.4-${FFMPEG_PLATFORM}-static/qt-faststart" /bin/qt-faststart && \
+    rm -rf /tmp/ffmpeg* && \
     echo "---> Preparing and Installing PHP" && \
     apk add --update \
     php7@php \
@@ -102,6 +122,7 @@ RUN echo "---> Enabling PHP-Alpine" && \
     php7-cgi@php \
     php7-zlib@php \
     php7-pcov@php \
+    php7-sockets@php \
     php7-phpdbg@php && \
     echo "Set disable_coredump false" >> /etc/sudo.conf && \
     sudo ln -s /usr/bin/php7 /usr/bin/php && \
@@ -117,43 +138,32 @@ RUN echo "---> Enabling PHP-Alpine" && \
     mkdir -p /home/ssl && \
     chown -R ambientum:ambientum /var/www && \
     chown -R ambientum:ambientum /home/ssl && \
-    wget -O /tini https://github.com/krallin/tini/releases/download/v0.18.0/tini-static && \
-    chmod +x /tini && \
     echo "---> Configuring PHP" && \
     echo "ambientum  ALL = ( ALL ) NOPASSWD: ALL" >> /etc/sudoers && \
+    sed -i "/;error_log = .*/c\error_log = /dev/stderr" /etc/php7/php.ini && \
     sed -i "/memory_limit = .*/c\memory_limit = $PHP_MEMORY_LIMIT" /etc/php7/php.ini && \
     sed -i "/user = .*/c\user = ambientum" /etc/php7/php-fpm.d/www.conf && \
     sed -i "/^group = .*/c\group = ambientum" /etc/php7/php-fpm.d/www.conf && \
     sed -i "/listen.owner = .*/c\listen.owner = ambientum" /etc/php7/php-fpm.d/www.conf && \
     sed -i "/listen.group = .*/c\listen.group = ambientum" /etc/php7/php-fpm.d/www.conf && \
     sed -i "/listen = .*/c\listen = [::]:9000" /etc/php7/php-fpm.d/www.conf && \
-    sed -i "/;access.log = .*/c\access.log = /proc/self/fd/2" /etc/php7/php-fpm.d/www.conf && \
+    sed -i "/;access.log = .*/c\access.log = /dev/stderr" /etc/php7/php-fpm.d/www.conf && \
+    sed -i "/;decorate_workers_output = .*/c\decorate_workers_output = no" /etc/php7/php-fpm.d/www.conf && \
     sed -i "/;clear_env = .*/c\clear_env = no" /etc/php7/php-fpm.d/www.conf && \
     sed -i "/;catch_workers_output = .*/c\catch_workers_output = yes" /etc/php7/php-fpm.d/www.conf && \
+    sed -i "/;log_level = .*/c\log_level = notice" /etc/php7/php-fpm.conf && \
+    sed -i "/;log_limit = .*/c\log_limit = 16384" /etc/php7/php-fpm.conf && \
     sed -i "/pid = .*/c\;pid = /run/php/php7-fpm.pid" /etc/php7/php-fpm.conf && \
     sed -i "/;daemonize = .*/c\daemonize = yes" /etc/php7/php-fpm.conf && \
-    sed -i "/error_log = .*/c\error_log = /proc/self/fd/2" /etc/php7/php-fpm.conf && \
+    sed -i "/error_log = .*/c\error_log = /dev/stderr" /etc/php7/php-fpm.conf && \
     sed -i "/;rlimit_files = .*/c\rlimit_files = 8192" /etc/php7/php-fpm.conf && \
     sed -i "/;rlimit_core = .*/c\rlimit_core = unlimited" /etc/php7/php-fpm.conf && \
     sed -i "/post_max_size = .*/c\post_max_size = 1000M" /etc/php7/php.ini && \
     sed -i "/upload_max_filesize = .*/c\upload_max_filesize = 1000M" /etc/php7/php.ini && \
     sed -i "/zend_extension=xdebug/c\;zend_extension=xdebug" /etc/php7/conf.d/00_xdebug.ini && \
-    echo "---> Adding Support for NewRelic" && \
-    mkdir /tmp/newrelic && \
-    cd /tmp/newrelic && \
-    wget -r -l1 -nd -A"linux-musl.tar.gz" https://download.newrelic.com/php_agent/release/ && \
-    gzip -dc newrelic*.tar.gz | tar xf - && \
-    cd newrelic-php5* && \
-    rm -f /usr/lib/php7/modules/newrelic.so && \
-    cp ./agent/x64/newrelic-20180731.so /usr/lib/php7/modules/newrelic.so && \
-    cp ./daemon/newrelic-daemon.x64 /usr/bin/newrelic-daemon && \
-    cp ./scripts/newrelic.ini.template /scripts/newrelic.ini && \
-    mkdir /var/log/newrelic && \
-    chown -R ambientum:ambientum /var/log/newrelic && \
     chown -R ambientum:ambientum /home/ambientum && \
     chown -R ambientum:ambientum /scripts && \
     chmod +x /scripts/*.sh && \
-    /scripts/update-cert.sh && \
     rm -rf /tmp/*
 
 # Define the running user
